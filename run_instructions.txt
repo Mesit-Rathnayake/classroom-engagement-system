@@ -1,0 +1,17 @@
+# How to run your main files
+
+1. Open Anaconda Prompt.
+2. Activate your environment:
+   conda activate dlibenv
+3. Change to your project directory:
+   cd "D:\My Projects\classroom-engagement-system"
+4. Run the main files:
+   python vision/main.py
+   python vision/head_pose_test.py
+
+If you use PowerShell or Command Prompt with .venv, activate the environment and run:
+   .\.venv\Scripts\activate
+   python vision/main.py
+   python vision/head_pose_test.py
+
+Make sure you use the environment where your dependencies are installed.
