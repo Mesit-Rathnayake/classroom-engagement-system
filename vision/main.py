@@ -1,211 +1,94 @@
 import cv2
-import dlib
-import numpy as np
+import time
+import argparse
 import os
-from scipy.spatial import distance as dist
-from collections import deque
+import sys
 
-# ==========================================================
-# CONFIGURATION
-# ==========================================================
+# Add directory containing main.py to path just in case
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-EAR_THRESHOLD = 0.23
-HEAD_YAW_TOLERANCE = 40  # max angle considered "forward"
-SMOOTH_FRAMES = 7
-DISTRACTION_FRAMES = 15
-MAX_SCORE = 100
+from detector import EngagementDetector
 
-SLEEPY_EAR_THRESHOLD = 0.20
-SLEEPY_CONSEC_FRAMES = 15  # must be below threshold for this many frames
+def main():
+    parser = argparse.ArgumentParser(description="Classroom Engagement System - Native CLI Viewer")
+    parser.add_argument("--use-cnn", action="store_true", help="Use GPU CNN face detector (requires CUDA-enabled dlib)")
+    parser.add_argument("--hide-landmarks", action="store_true", help="Hide facial landmark dots from display")
+    parser.add_argument("--ear", type=float, default=None, help="Override eye aspect ratio threshold")
+    parser.add_argument("--yaw", type=float, default=None, help="Override head yaw tolerance (deg)")
+    args = parser.parse_args()
 
-# ==========================================================
-# PATH SETUP
-# ==========================================================
+    detector = EngagementDetector()
+    
+    # Apply CLI threshold overrides if specified
+    if args.ear is not None:
+        detector.EAR_THRESHOLD = args.ear
+    if args.yaw is not None:
+        detector.HEAD_YAW_TOLERANCE = args.yaw
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "shape_predictor_68_face_landmarks.dat")
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Cannot open camera.")
+        return
 
-# ==========================================================
-# HELPER FUNCTIONS
-# ==========================================================
+    print("==================================================")
+    print("Classroom Engagement System: Native CLI Running")
+    print("==================================================")
+    print("Press 'q' in the camera window to quit.")
+    if args.use_cnn:
+        print("GPU Face Detection (dlib CNN) is active.")
+    else:
+        print("CPU Face Detection (dlib HOG) is active.")
+    print("--------------------------------------------------")
 
-def eye_aspect_ratio(eye):
-    A = dist.euclidean(eye[1], eye[5])
-    B = dist.euclidean(eye[2], eye[4])
-    C = dist.euclidean(eye[0], eye[3])
-    return (A + B) / (2.0 * C)
+    prev_time = time.time()
+    frame_idx = 0
 
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Failed to grab frame.")
+            break
 
-def get_head_pose(shape, frame_size):
-    image_points = np.array([
-        (shape.part(30).x, shape.part(30).y),  # Nose
-        (shape.part(8).x, shape.part(8).y),    # Chin
-        (shape.part(36).x, shape.part(36).y),  # Left eye
-        (shape.part(45).x, shape.part(45).y),  # Right eye
-        (shape.part(48).x, shape.part(48).y),  # Left mouth
-        (shape.part(54).x, shape.part(54).y)   # Right mouth
-    ], dtype="double")
+        # Analyze using unified engine
+        result = detector.analyze_frame(
+            frame,
+            draw_landmarks=not args.hide_landmarks,
+            use_cnn=args.use_cnn
+        )
 
-    model_points = np.array([
-        (0.0, 0.0, 0.0),
-        (0.0, -330.0, -65.0),
-        (-225.0, 170.0, -135.0),
-        (225.0, 170.0, -135.0),
-        (-150.0, -150.0, -125.0),
-        (150.0, -150.0, -125.0)
-    ])
+        # Calculate FPS
+        current_time = time.time()
+        fps = 1.0 / (current_time - prev_time)
+        prev_time = current_time
 
-    focal_length = frame_size[1]
-    center = (frame_size[1] / 2, frame_size[0] / 2)
+        # Draw FPS on screen
+        cv2.putText(result["frame"], f"FPS: {fps:.1f}", (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
-    camera_matrix = np.array([
-        [focal_length, 0, center[0]],
-        [0, focal_length, center[1]],
-        [0, 0, 1]
-    ], dtype="double")
+        # Draw current mode indicator
+        mode_text = "MODE: GPU CNN" if args.use_cnn else "MODE: CPU HOG"
+        cv2.putText(result["frame"], mode_text, (20, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
 
-    dist_coeffs = np.zeros((4, 1))
+        # Render OpenCV native window
+        cv2.imshow("Classroom Engagement System", result["frame"])
 
-    success, rotation_vector, translation_vector = cv2.solvePnP(
-        model_points,
-        image_points,
-        camera_matrix,
-        dist_coeffs,
-        flags=cv2.SOLVEPNP_ITERATIVE
-    )
+        # Throttle terminal logs (print once per second / 30 frames)
+        frame_idx += 1
+        if frame_idx % 30 == 0:
+            print(f"[Stats] Active Faces: {result['num_faces']} | Engaged: {result['engaged']} | Distracted: {result['distracted']} | Sleepy: {result['sleepy']} | Yawning: {result['yawning']} | Class: {result['engagement']}%")
 
-    if not success:
-        return 0
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            print("\nShutting down camera feed...")
+            break
+        elif key == ord('c'):
+            print("\nRecalibrating base posture...")
+            detector.reset_calibration()
 
-    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-    pose_matrix = cv2.hconcat((rotation_matrix, translation_vector))
-    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_matrix)
-    yaw = float(euler_angles[1])  # left/right
-    return yaw
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Goodbye!")
 
-def compute_engagement_score(ear, yaw):
-    """
-    Weighted engagement score:
-    - 50 points for eye openness (0 if closed)
-    - 50 points for head yaw (0 if fully turned away)
-    """
-    eye_score = np.clip((ear / EAR_THRESHOLD) * 50, 0, 50)
-    yaw_score = max(0, 50 - (abs(yaw) / HEAD_YAW_TOLERANCE) * 50)
-    return eye_score + yaw_score
-
-# ==========================================================
-# INITIALIZATION
-# ==========================================================
-
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor(MODEL_PATH)
-cap = cv2.VideoCapture(0)
-
-face_data = {}  # store per-face smoothing and sleepy counters
-
-# ==========================================================
-# MAIN LOOP
-# ==========================================================
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    frame_size = frame.shape
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = detector(gray)
-
-    total_engagement = 0
-    face_count = len(faces)
-
-    for i, face in enumerate(faces):
-        shape = predictor(gray, face)
-        face_id = i
-
-        # Initialize history if new face
-        if face_id not in face_data:
-            face_data[face_id] = {
-                "ear_history": deque(maxlen=SMOOTH_FRAMES),
-                "yaw_history": deque(maxlen=SMOOTH_FRAMES),
-                "sleepy_counter": 0
-            }
-
-        # ==================================================
-        # EYE ASPECT RATIO
-        # ==================================================
-        left_eye = np.array([(shape.part(n).x, shape.part(n).y) for n in range(36, 42)])
-        right_eye = np.array([(shape.part(n).x, shape.part(n).y) for n in range(42, 48)])
-        leftEAR = eye_aspect_ratio(left_eye)
-        rightEAR = eye_aspect_ratio(right_eye)
-        ear = (leftEAR + rightEAR) / 2.0
-        face_data[face_id]["ear_history"].append(ear)
-        smoothed_ear = np.mean(face_data[face_id]["ear_history"])
-
-        # ==================================================
-        # HEAD POSE
-        # ==================================================
-        yaw = get_head_pose(shape, frame_size)
-        face_data[face_id]["yaw_history"].append(yaw)
-        smoothed_yaw = np.mean(face_data[face_id]["yaw_history"])
-
-        # ==================================================
-        # SLEEPY DETECTION
-        # ==================================================
-        if smoothed_ear < SLEEPY_EAR_THRESHOLD:
-            face_data[face_id]["sleepy_counter"] += 1
-        else:
-            face_data[face_id]["sleepy_counter"] = 0
-
-        is_sleepy = face_data[face_id]["sleepy_counter"] >= SLEEPY_CONSEC_FRAMES
-
-        # ==================================================
-        # ENGAGEMENT SCORE
-        # ==================================================
-        if is_sleepy:
-            engagement_score = 0
-        else:
-            engagement_score = compute_engagement_score(smoothed_ear, smoothed_yaw)
-
-        total_engagement += engagement_score
-
-        # ==================================================
-        # STATUS DISPLAY
-        # ==================================================
-        if is_sleepy:
-            status = "Sleepy"
-            color = (0, 0, 255)
-        elif engagement_score > 70:
-            status = "Engaged"
-            color = (0, 255, 0)
-        elif engagement_score > 40:
-            status = "Distracted"
-            color = (0, 165, 255)
-        else:
-            status = "Distracted"
-            color = (0, 165, 255)
-
-        x, y, w, h = face.left(), face.top(), face.width(), face.height()
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(frame, f"{status} ({int(engagement_score)})", (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-    # ==================================================
-    # CLASS ENGAGEMENT DISPLAY
-    # ==================================================
-    class_engagement_percent = (total_engagement / (face_count * MAX_SCORE) * 100) if face_count > 0 else 0
-    cv2.putText(frame,
-                f"Class Engagement: {class_engagement_percent:.1f}%",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2)
-
-    cv2.imshow("Classroom Engagement System", frame)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
